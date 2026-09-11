@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Site-specific PBS template; configure the OpenMM/CUDA environment first.
+#PBS -q sg8
+#PBS -N test36_explicit_clay
+#PBS -l walltime=12:00:00
+#PBS -l select=1:ncpus=8:mpiprocs=1:ompthreads=8:mem=16gb:ngpus=1
+#PBS -j oe
+set -euo pipefail
+cd "${PBS_O_WORKDIR:?Submit from the directory containing test36_aa.py}"
+task_python="${AA_PYTHON:?Set AA_PYTHON to an OpenMM-enabled Python executable}"
+task_input="${AA_INPUT:?Set AA_INPUT to the prepared all-atom input directory}"
+task_output="${AA_OUTPUT:?Set AA_OUTPUT to a NEW output directory}"
+"$task_python" -u test36_aa.py run --input "$task_input" --output "$task_output" \
+  --platform "${AA_PLATFORM:-CUDA}" --threads "${AA_THREADS:-8}" \
+  --warmup-ps "${WARMUP_PS:-2}" --equilibration-ps "${EQUILIBRATION_PS:-500}" \
+  --production-ps "${PRODUCTION_PS:-1000}" --save-every "${SAVE_EVERY:-2000}" \
+  --time-budget-hours "${TIME_BUDGET_HOURS:-11.5}"
+"$task_python" -u test36_aa.py analyze --input "$task_input" --run "$task_output"
