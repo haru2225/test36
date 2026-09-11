@@ -1,51 +1,46 @@
 #!/usr/bin/env bash
-# Submit from the directory containing test36.py; see TEST36.md.
+# qsub run_test36.pbs でAA結果からCG-MD・解析まで実行する。
+# 必要ならDATASET_PATH, TRAIN_DIRなどを環境変数で上書き可能。
 #PBS -q sg8
-#PBS -N test36_clay_cg
+#PBS -N test36_clay_all
 #PBS -l walltime=12:00:00
 #PBS -l select=1:ncpus=8:mpiprocs=1:ompthreads=8:mem=32gb:ngpus=1
 #PBS -j oe
 set -euo pipefail
-WORK_DIR="${PBS_O_WORKDIR:?Submit with qsub from the test36 directory}"
-cd "$WORK_DIR"
-WORK_DIR="$(pwd -P)"
-STAGE="${STAGE:-train}"
-DM2_ROOT="${DM2_ROOT:-$WORK_DIR/DM2}"
-SIF_IMAGE="${SIF_IMAGE:-$WORK_DIR/test36.sif}"
-OUTPUT_DIR="${OUTPUT_DIR:?Set OUTPUT_DIR to a new directory, or the training directory with RESUME=1}"
-RUNTIME="${CONTAINER_RUNTIME:-singularity}"
-[[ -d "$DM2_ROOT/src/graphite" ]] || { echo "Missing DM2/src/graphite: $DM2_ROOT" >&2; exit 2; }
-[[ -r "$SIF_IMAGE" ]] || { echo "Missing container: $SIF_IMAGE" >&2; exit 2; }
-mkdir -p "$OUTPUT_DIR"
-OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
-DM2_ROOT="$(cd "$DM2_ROOT" && pwd -P)"
-cmd=("$RUNTIME" exec --nv --bind "$WORK_DIR:/work:ro" --bind "$DM2_ROOT:/dm2:ro"
-     --bind "$OUTPUT_DIR:/output" --env DM2_ROOT=/dm2 --env OMP_NUM_THREADS=8 --pwd /work)
-args=("$STAGE" --output /output)
-case "$STAGE" in
-    train)
-        DATASET_PATH="${DATASET_PATH:?Set DATASET_PATH to the prepared test36 dataset}"
-        DATASET_PATH="$(cd "$DATASET_PATH" && pwd -P)"
-        cmd+=(--bind "$DATASET_PATH:/dataset:ro")
-        args+=(--dataset /dataset --device cuda --updates "${UPDATES:-30000}"
-               --batch-size "${BATCH_SIZE:-16}" --time-budget-hours "${TIME_BUDGET_HOURS:-11.5}")
-        [[ "${RESUME:-0}" == 1 ]] && args+=(--resume)
-        ;;
-    generate|export|md)
-        CHECKPOINT_PATH="${CHECKPOINT_PATH:?Set CHECKPOINT_PATH to the test36 checkpoint.pt}"
-        [[ -r "$CHECKPOINT_PATH" ]] || { echo "Missing checkpoint" >&2; exit 2; }
-        cmd+=(--bind "$CHECKPOINT_PATH:/checkpoint.pt:ro")
-        args+=(--checkpoint /checkpoint.pt)
-        if [[ "$STAGE" == generate ]]; then
-            args+=(--device cuda --time-budget-hours "${TIME_BUDGET_HOURS:-11.5}")
-            [[ "${RESUME:-0}" == 1 ]] && args+=(--resume)
-        else
-            args+=(--sigma-ref "${SIGMA_REF:?Choose experimental SIGMA_REF in angstrom}")
-            if [[ "$STAGE" == md ]]; then
-                args+=(--device cuda --steps "${STEPS:-1000}" --time-budget-hours "${TIME_BUDGET_HOURS:-11.5}")
-            fi
-        fi
-        ;;
-    *) echo "Supported PBS stages: train, generate, export, md" >&2; exit 2 ;;
-esac
-"${cmd[@]}" "$SIF_IMAGE" python -u /work/test36.py "${args[@]}"
+work_dir="${PBS_O_WORKDIR:?}"
+cd "$work_dir"
+runtime="${CONTAINER_RUNTIME:-singularity}"
+sif="${SIF_IMAGE:-$work_dir/test36.sif}"
+dm2="${DM2_ROOT:-$work_dir/DM2}"
+aa_run="${AA_RUN:-$work_dir/test36-aa/long-run/run}"
+dataset="${DATASET_PATH:-$work_dir/test36-aa/long-run/dataset}"
+train="${TRAIN_DIR:-$work_dir/test36-aa/long-run/train}"
+generated="${GENERATED_DIR:-$work_dir/test36-aa/long-run/generated}"
+cgmd="${CGMD_DIR:-$work_dir/test36-aa/long-run/cgmd}"
+analysis="${ANALYSIS_DIR:-$work_dir/test36-aa/long-run/cgmd-analysis}"
+trajectory="$aa_run/production.extxyz"
+mapping="$aa_run/mapping.json"
+checkpoint="$train/checkpoint.pt"
+[[ -r "$sif" ]] || { echo "Missing SIF_IMAGE: $sif" >&2; exit 2; }
+[[ -d "$dm2/src/graphite" ]] || { echo "Missing DM2_ROOT: $dm2" >&2; exit 2; }
+[[ -r "$trajectory" && -r "$mapping" ]] || { echo "Missing AA result: $aa_run" >&2; exit 2; }
+run_container() {
+  "$runtime" exec --nv --bind "$work_dir:/work" --bind "$dm2:/dm2:ro" \
+    --env DM2_ROOT=/dm2 --env OMP_NUM_THREADS=8 --pwd /work "$sif" python -u /work/test36.py "$@"
+}
+if [[ ! -f "$dataset/metadata.json" ]]; then
+  run_container prepare --trajectory "/work/${trajectory#$work_dir/}" --mapping "/work/${mapping#$work_dir/}" --output "/work/${dataset#$work_dir/}"
+fi
+if [[ ! -f "$checkpoint" ]]; then
+  run_container train --dataset "/work/${dataset#$work_dir/}" --output "/work/${train#$work_dir/}" --device cuda --updates "${UPDATES:-30000}" --batch-size "${BATCH_SIZE:-16}" --time-budget-hours "${TRAIN_TIME_HOURS:-11.5}"
+fi
+if [[ ! -f "$generated/generation.json" ]]; then
+  run_container generate --checkpoint "/work/${checkpoint#$work_dir/}" --output "/work/${generated#$work_dir/}" --device cuda --time-budget-hours "${GENERATE_TIME_HOURS:-11.5}"
+fi
+if [[ ! -f "$cgmd/run_metrics.json" ]]; then
+  run_container md --checkpoint "/work/${checkpoint#$work_dir/}" --output "/work/${cgmd#$work_dir/}" --device cuda --sigma-ref "${SIGMA_REF:-0.1}" --steps "${CGMD_STEPS:-10000}" --time-budget-hours "${CGMD_TIME_HOURS:-11.5}"
+fi
+if [[ ! -f "$analysis/rdf.json" ]]; then
+  run_container analyze --reference "/work/${dataset#$work_dir/}" --samples "/work/${cgmd#$work_dir/}/md.extxyz" --output "/work/${analysis#$work_dir/}" --r-max "${R_MAX:-5}"
+fi
+echo "test36 complete: $analysis"
