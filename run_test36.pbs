@@ -18,12 +18,20 @@ train="${TRAIN_DIR:-$work_dir/test36-aa/long-run/train}"
 generated="${GENERATED_DIR:-$work_dir/test36-aa/long-run/generated}"
 cgmd="${CGMD_DIR:-$work_dir/test36-aa/long-run/cgmd}"
 analysis="${ANALYSIS_DIR:-$work_dir/test36-aa/long-run/cgmd-analysis}"
-trajectory="$aa_run/production.extxyz"
-mapping="$aa_run/mapping.json"
+trajectory="${AA_TRAJECTORY:-$aa_run/production.extxyz}"
+mapping="${AA_MAPPING:-$aa_run/mapping.json}"
 checkpoint="$train/checkpoint.pt"
 [[ -r "$sif" ]] || { echo "Missing SIF_IMAGE: $sif" >&2; exit 2; }
 [[ -d "$dm2/src/graphite" ]] || { echo "Missing DM2_ROOT: $dm2" >&2; exit 2; }
-[[ -r "$trajectory" && -r "$mapping" ]] || { echo "Missing AA result: $aa_run" >&2; exit 2; }
+if [[ ! -r "$trajectory" || ! -r "$mapping" ]]; then
+  for candidate in "$work_dir/production.extxyz" "$work_dir/aa/production.extxyz" "$work_dir/test36-aa/long-run/run/production.extxyz"; do
+    if [[ -r "$candidate" ]]; then trajectory="$candidate"; break; fi
+  done
+  for candidate in "$work_dir/mapping.json" "$work_dir/aa/mapping.json" "$work_dir/test36-aa/long-run/run/mapping.json"; do
+    if [[ -r "$candidate" ]]; then mapping="$candidate"; break; fi
+  done
+fi
+[[ -r "$trajectory" && -r "$mapping" ]] || { echo "Missing AA result. Set AA_TRAJECTORY and AA_MAPPING, or copy production.extxyz and mapping.json into $work_dir" >&2; exit 2; }
 run_container() {
   "$runtime" exec --nv --bind "$work_dir:/work" --bind "$dm2:/dm2:ro" \
     --env DM2_ROOT=/dm2 --env OMP_NUM_THREADS=8 --pwd /work "$sif" python -u /work/test36.py "$@"
